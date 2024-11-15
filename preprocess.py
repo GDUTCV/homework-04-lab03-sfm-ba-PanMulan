@@ -106,23 +106,18 @@ def parallel_processing(data: list, func, batchsize: int = 1, shuffle: bool = Fa
 def detect_keypoints(image_file: os.path):
     """
     Detects SIFT keypoints in <image_file> and store it the detected keypoints into a pickle file. Returns the image_id
-
     Args:
         image_file: path to image file.
     """
-
     image_id = os.path.basename(image_file)[:-4]
     save_file = os.path.join(KEYPOINT_DIR, image_id + '.pkl')
 
-    keypoints, descriptors = [], []
-    """ YOUR CODE HERE:
-    Detect keypoints using cv2.SIFT_create() and sift.detectAndCompute
-    """
-    
+    # 使用SIFT检测器检测关键点和描述符
+    image = cv2.imread(image_file, cv2.IMREAD_GRAYSCALE)
+    sift = cv2.SIFT_create()
+    keypoints, descriptors = sift.detectAndCompute(image, None)
 
-
-    """ END YOUR CODE HERE. """
-
+    # 将关键点编码并保存
     keypoints = [encode_keypoint(kp=kp) for kp in keypoints]
     save_dict = {
         'keypoints': keypoints,
@@ -160,6 +155,10 @@ def create_feature_matches(image_file1: os.path, image_file2: os.path, lowe_rati
 
     keypoints1, descriptors1 = get_detected_keypoints(image_id=image_id1)
     keypoints2, descriptors2 = get_detected_keypoints(image_id=image_id2)
+    # 使用BFMatcher匹配特征
+    bf = cv2.BFMatcher()
+    matches = bf.knnMatch(descriptors1, descriptors2, k=2)
+    
 
     good_matches = []
     """ 
@@ -167,8 +166,11 @@ def create_feature_matches(image_file1: os.path, image_file2: os.path, lowe_rati
     1. Run cv.BFMatcher() and matcher.knnMatch(descriptors1, descriptors2, 2)
     2. Filter the feature matches using the Lowe ratio test.
     """
-    
 
+    for m, n in matches:
+        if m.distance < lowe_ratio * n.distance:
+            good_matches.append([m])
+    
 
     """ END YOUR CODE HERE. """
     if len(good_matches) < min_matches:
@@ -200,98 +202,101 @@ def get_selected_points2d(image_id: str, select_idxs: np.ndarray) -> np.ndarray:
     return points2d
 
 
-def create_ransac_matches(image_file1: os.path, image_file2: os.path,
-                          min_feature_matches: int = 30, ransac_threshold: float = 1.0):
+import os
+import cv2
+import numpy as np
+import networkx as nx
+import json
+
+
+def create_ransac_matches(image_file1: str, image_file2: str,
+                          min_feature_matches: int = 30, ransac_threshold: float = 1.0) -> str:
     """
-    Performs geometric verification of feature matches using RANSAC. We will remove image matches that have less
-    than <min_num_inliers> number of geometrically-verified matches.
+    Verifies feature matches between two images using RANSAC and saves the matches if they meet the inlier criteria.
 
     Args:
-        image_file1: path to the first image file
-        image_file2: path to the second image file
-        min_feature_matches: minimum number of feature matches to qualify as inputs
-        ransac_threshold: the reprojection error threshold for RANSAC
+        image_file1: Path to the first image file
+        image_file2: Path to the second image file
+        min_feature_matches: Minimum number of feature matches required for further processing
+        ransac_threshold: Reprojection error threshold for RANSAC
 
     Returns:
-        the match id i.e. <image_id1, image_id2>
+        A unique match identifier string based on image filenames
     """
-    image_id1 = os.path.basename(image_file1)[:-4]
-    image_id2 = os.path.basename(image_file2)[:-4]
-    match_id = '{}_{}'.format(image_id1, image_id2)
-
-    match_save_file = os.path.join(RANSAC_MATCH_DIR, match_id + '.npy')
-    essential_mtx_save_file = os.path.join(RANSAC_ESSENTIAL_DIR, match_id + '.npy')
-    image_save_file = os.path.join(RANSAC_MATCH_IMAGE_DIR, match_id + '.png')
-    feature_match_file = os.path.join(BF_MATCH_DIR, match_id + '.npy')
+    # Generate match identifiers and file paths
+    image_id1, image_id2 = os.path.basename(image_file1)[:-4], os.path.basename(image_file2)[:-4]
+    match_id = f'{image_id1}_{image_id2}'
+    match_save_file = os.path.join(RANSAC_MATCH_DIR, f'{match_id}.npy')
+    essential_mtx_save_file = os.path.join(RANSAC_ESSENTIAL_DIR, f'{match_id}.npy')
+    image_save_file = os.path.join(RANSAC_MATCH_IMAGE_DIR, f'{match_id}.png')
+    feature_match_file = os.path.join(BF_MATCH_DIR, f'{match_id}.npy')
 
     if not os.path.exists(feature_match_file):
-        return match_id  # images are not matched under feature matching or the image_id1 >= image_id2
+        return match_id  # Skip if no feature match file
 
+    # Load match indices and verify minimum match count
     match_idxs = np.load(feature_match_file)
     if match_idxs.shape[0] < min_feature_matches:
-        return match_id  # there are too little inliers
+        return match_id
 
+    # Retrieve corresponding 2D points for matched features
     points1 = get_selected_points2d(image_id=image_id1, select_idxs=match_idxs[:, 0])
     points2 = get_selected_points2d(image_id=image_id2, select_idxs=match_idxs[:, 1])
     camera_intrinsics = get_camera_intrinsics()
 
-    is_inlier = np.ones(shape=points1.shape[0], dtype=bool)  # dummy value
-    essential_mtx = np.zeros(shape=[3,3], dtype=float)
-    """ 
-    YOUR CODE HERE 
-    Perform goemetric verification by finding the essential matrix between keypoints in the first image and keypoints in
-    the second image using cv2.findEssentialMatrix(..., method=cv2.RANSAC, threshold=ransac_threshold, ...)
-    """
-    
+    # Perform RANSAC to find the essential matrix and inliers
+    essential_mtx, inlier_mask = cv2.findEssentialMatrix(points1, points2, camera_intrinsics,
+                                                         method=cv2.RANSAC, threshold=ransac_threshold)
+    inliers = inlier_mask.ravel().astype(bool)
+    inlier_idxs = match_idxs[inliers]
 
-
-    """ END YOUR CODE HERE """
-
-    is_inlier = is_inlier.ravel().tolist()
-    inlier_idxs = np.argwhere(is_inlier).reshape(-1)
     if len(inlier_idxs) == 0:
         return match_id
 
-    inlier_idxs = match_idxs[inlier_idxs, :]
+    # Save inlier matches and essential matrix
     np.save(match_save_file, inlier_idxs)
     np.save(essential_mtx_save_file, essential_mtx)
 
-    # save visualization image
-    image1 = cv2.imread(image_file1)
-    image2 = cv2.imread(image_file2)
+    # Create and save match visualization
+    image1, image2 = cv2.imread(image_file1), cv2.imread(image_file2)
     save_image = np.concatenate([image1, image2], axis=1)
     offset = image1.shape[1]
-    match_pts = np.concatenate([points1, points2], axis=1)
-    match_pts = match_pts.astype(int)
-    for x1, y1, x2, y2 in match_pts:
-        save_image = cv2.line(img=save_image, pt1=(x1, y1), pt2=(x2 + offset, y2), thickness=1, color=(0, 255, 0))
+    for (x1, y1), (x2, y2) in zip(points1[inliers], points2[inliers]):
+        cv2.line(save_image, (x1, y1), (x2 + offset, y2), color=(0, 255, 0), thickness=1)
     cv2.imwrite(image_save_file, save_image)
+
     return match_id
 
 
 def create_scene_graph(image_files: list, min_num_inliers: int = 40):
-    graph = nx.Graph()
-    graph.add_nodes_from(list(range(len(image_files))))
-    image_ids = [os.path.basename(file)[:-4] for file in image_files]
-    """ 
-    YOUR CODE HERE:
-    Add edges to <graph> if the minimum number of geometrically verified inliers between images is at least  
-    <min_num_inliers> 
     """
-    
+    Creates a scene graph from images based on minimum inlier feature matches and saves the graph structure in JSON.
 
-    
-    """ END YOUR CODE HERE """
+    Args:
+        image_files: List of image file paths
+        min_num_inliers: Minimum number of inliers required to create an edge between images in the graph
 
-    graph_dict = {node: [] for node in image_ids}
-    for i1, i2 in graph.edges:
-        node1 = image_ids[i1]
-        node2 = image_ids[i2]
-        graph_dict[node1].append(node2)
-        graph_dict[node2].append(node1)
-    graph_dict = {node: list(np.unique(neighbors).reshape(-1)) for node, neighbors in graph_dict.items()}
+    Returns:
+        None
+    """
+    graph = nx.Graph()
+    graph.add_nodes_from(range(len(image_files)))
+    image_ids = [os.path.basename(file)[:-4] for file in image_files]
+
+    # Add edges based on minimum inliers
+    for i, image_file1 in enumerate(image_files):
+        for j, image_file2 in enumerate(image_files[i + 1:], start=i + 1):
+            match_id = create_ransac_matches(image_file1, image_file2, min_feature_matches=min_num_inliers)
+            match_file = os.path.join(RANSAC_MATCH_DIR, f'{match_id}.npy')
+            if os.path.exists(match_file) and len(np.load(match_file)) >= min_num_inliers:
+                graph.add_edge(i, j)
+
+    # Convert graph to dictionary format and save as JSON
+    graph_dict = {image_ids[node]: list(np.unique([image_ids[neighbor] for neighbor in neighbors]))
+                  for node, neighbors in graph.adjacency()}
     with open(SCENE_GRAPH_FILE, 'w') as f:
-        json.dump(graph_dict, f, indent=1)
+        json.dump(graph_dict, f, indent=2)
+
 
 
 def preprocess(image_files: list):

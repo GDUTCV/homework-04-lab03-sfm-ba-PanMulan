@@ -6,7 +6,7 @@ def compute_ba_residuals(parameters: np.ndarray, intrinsics: np.ndarray, num_cam
                          camera_idxs: np.ndarray, points3d_idxs: np.ndarray) -> np.ndarray:
     """
     For each point2d in <points2d>, find its 3d point, reproject it back into the image and return the residual
-    i.e. euclidean distance between the point2d and reprojected point.
+    i.e., euclidean distance between the point2d and reprojected point.
 
     Args:
         parameters: list of camera parameters [r1, r2, r3, t1, t2, t3, ...] where r1, r2, r3 corresponds to the
@@ -19,7 +19,6 @@ def compute_ba_residuals(parameters: np.ndarray, intrinsics: np.ndarray, num_cam
 
     Returns:
         N residuals
-
     """
     num_camera_parameters = 6 * num_cameras
     camera_parameters = parameters[:num_camera_parameters]
@@ -31,6 +30,7 @@ def compute_ba_residuals(parameters: np.ndarray, intrinsics: np.ndarray, num_cam
     camera_rvecs = camera_parameters[:, :3]
     camera_tvecs = camera_parameters[:, 3:]
 
+    # Convert rvecs to rotation matrices
     extrinsics = []
     for rvec in camera_rvecs:
         rot_mtx, _ = cv2.Rodrigues(rvec)
@@ -38,14 +38,22 @@ def compute_ba_residuals(parameters: np.ndarray, intrinsics: np.ndarray, num_cam
     extrinsics = np.array(extrinsics)  # C x 3 x 3
     extrinsics = np.concatenate([extrinsics, camera_tvecs.reshape(-1, 3, 1)], axis=2)  # C x 3 x 4
 
-    residuals = np.zeros(shape=points2d.shape[0], dtype=float)
-    """ 
-    YOUR CODE HERE: 
-    NOTE: DO NOT USE LOOPS 
-    HINT: I used np.matmul; np.sum; np.sqrt; np.square, np.concatenate etc.
-    """
-    
+    # Select extrinsics and points3d based on indices
+    selected_extrinsics = extrinsics[camera_idxs]  # N x 3 x 4
+    selected_points3d = points3d[points3d_idxs]  # N x 3
 
-    
-    """ END YOUR CODE HERE """
+    # Convert 3D points to homogeneous coordinates
+    points3d_homogeneous = np.concatenate([selected_points3d, np.ones((selected_points3d.shape[0], 1))], axis=1)  # N x 4
+
+    # Project 3D points to 2D using extrinsics and intrinsics
+    projected_points3d = np.matmul(selected_extrinsics, points3d_homogeneous[:, :, None]).squeeze()  # N x 3
+    projected_points2d = np.matmul(intrinsics, projected_points3d.T).T  # N x 3
+
+    # Normalize homogeneous coordinates
+    projected_points2d /= projected_points2d[:, 2:3]
+
+    # Compute residuals as Euclidean distances
+    residuals = np.sqrt(np.sum(np.square(points2d - projected_points2d[:, :2]), axis=1))
+
     return residuals
+
